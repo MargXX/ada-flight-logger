@@ -1,5 +1,14 @@
+# Build output
+/alire/
+/bin/
+/config/
+/lib/
+/obj/
+
 # Object file
 *.o
 
 # Ada Library Information
 *.ali
+
+.DS_Store

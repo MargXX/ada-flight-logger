@@ -1,0 +1,29 @@
+with "config/ada_flight_logger_config.gpr";
+with "pico_bsp.gpr";
+
+project Ada_Flight_Logger is
+   for Target use "arm-eabi";
+   for Runtime ("Ada") use "light-cortex-m0p";
+
+   for Source_Dirs use ("src/", "src/core/", "src/drivers/", "config/");
+   for Object_Dir use "obj/" & Ada_Flight_Logger_Config.Build_Profile;
+   for Create_Missing_Dirs use "True";
+   for Exec_Dir use "bin";
+   for Main use
+     ("flight_logger.adb",
+      "flight_reader.adb",
+      "sensor_test.adb",
+      "flash_erase.adb");
+
+   package Linker is
+      for Switches ("Ada") use Pico_BSP.Linker_Switches;
+   end Linker;
+
+   package Compiler is
+      for Default_Switches ("Ada") use Ada_Flight_Logger_Config.Ada_Compiler_Switches;
+   end Compiler;
+
+   package Binder is
+      for Switches ("Ada") use ("-Es");
+   end Binder;
+end Ada_Flight_Logger;
