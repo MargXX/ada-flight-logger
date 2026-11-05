@@ -1,0 +1,7 @@
+name = "host_tests"
+description = "Host tests for the code with no hardware access"
+version = "0.0.0"
+executables = ["host_tests"]
+
+[[depends-on]]
+gnat_native = "*"
