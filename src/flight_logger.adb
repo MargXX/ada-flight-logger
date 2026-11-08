@@ -5,8 +5,8 @@
 --  General plan:
 --  Every 10 ms tick reads the accelerometer to watch for launch.
 --  Ground rate: logs a full sample every 10th tick (10 Hz).
---  Flight rate: logs every tick (100 Hz) for 5 minutes after launch, then
---  drops back and re-arms, so a false trigger only costs about 4 percent of
+--  Flight rate: logs every tick (100 Hz) for 10 minutes after launch, then
+--  drops back and re-arms, so a false trigger only costs about 8 percent of
 --  the flash. The page layout is in sample_log.ads.
 --
 --  LED: toggles on each page written. Fast blink is a boot fault, which keeps
@@ -33,7 +33,7 @@ procedure Flight_Logger is
 
    Tick_Us             : constant := 10_000;  --  100 Hz loop
    Ground_Log_Interval : constant := 10;      --  ticks between ground samples
-   Flight_Rate_Ticks   : constant := 30_000;  --  5 minutes of 10 ms ticks
+   Flight_Rate_Ticks   : constant := 60_000;  --  10 minutes of 10 ms ticks
 
    Log         : Sample_Log.Log;
    Detector    : Launch_Detect.Detector;
