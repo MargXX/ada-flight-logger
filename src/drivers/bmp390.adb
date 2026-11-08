@@ -8,15 +8,25 @@ package body BMP390 is
    Addr : constant I2C_Address := 16#EE#;
 
    ERR_REG   : constant UInt8 := 16#02#;
+   STATUS    : constant UInt8 := 16#03#;
    DATA_0    : constant UInt8 := 16#04#;
    PWR_CTRL  : constant UInt8 := 16#1B#;
    OSR       : constant UInt8 := 16#1C#;
    ODR       : constant UInt8 := 16#1D#;
    CONFIG    : constant UInt8 := 16#1F#;
    NVM_START : constant UInt8 := 16#31#;
+   CMD       : constant UInt8 := 16#7E#;
 
    Press_And_Temp_On : constant UInt8 := 16#03#;
    Conf_Err_Bit      : constant UInt8 := 16#04#;
+   Soft_Reset        : constant UInt8 := 16#B6#;
+
+   --  STATUS.drdy_press and STATUS.drdy_temp, cleared by reading DATA
+   Data_Ready_Bits   : constant UInt8 := 16#60#;
+
+   --  the slowest allowed rate is 12.5 Hz, so a new result is due within
+   --  80 ms in normal mode. Wait a little longer than that.
+   Data_Wait_Ms : constant := 100;
 
    --  short so a stuck bus can't stall the logging loop for long
    Timeout_Ms : constant := 5;
@@ -65,10 +75,18 @@ package body BMP390 is
       --  mode is bits 5:4
       Mode_Bits : constant UInt8 := UInt8 (Power_Mode'Enum_Rep (Mode)) * 16;
 
-      Error : I2C_Data (1 .. 1);
+      Error   : I2C_Data (1 .. 1);
+      Power   : I2C_Data (1 .. 1);
+      Flags   : I2C_Data (1 .. 1);
+      Discard : I2C_Data (1 .. 6);
    begin
-      --  go to sleep so the new settings apply cleanly
-      Write (PWR_CTRL, 0, Ok);
+      --  Reset to power-on defaults, so the chip is asleep and idle however
+      --  it was left. It keeps power across a Pico reset, and a mode change
+      --  sent mid-measurement can be ignored, which froze the readings once.
+      Write (CMD, Soft_Reset, Ok);
+
+      --  the datasheet allows 2 ms for the reset
+      RP.Device.Timer.Delay_Milliseconds (10);
 
       if Ok then
          Write (OSR, OSR_Value, Ok);
@@ -93,6 +111,38 @@ package body BMP390 is
       end if;
       if Ok then
          Ok := (Error (1) and Conf_Err_Bit) = 0;
+      end if;
+
+      --  check that the mode and enables actually took
+      if Ok then
+         Read (PWR_CTRL, Power, Ok);
+      end if;
+      if Ok then
+         Ok := (Power (1) and 16#33#) = Press_And_Temp_On + Mode_Bits;
+      end if;
+
+      --  in normal mode, wait for a fresh result to prove it is measuring
+      if Ok and then Mode = Normal then
+         --  reading the data clears the ready flags
+         Read (DATA_0, Discard, Ok);
+
+         if Ok then
+            Ok := False;
+            for I in 1 .. Data_Wait_Ms loop
+               RP.Device.Timer.Delay_Milliseconds (1);
+               declare
+                  Read_Ok : Boolean;
+               begin
+                  Read (STATUS, Flags, Read_Ok);
+                  if Read_Ok
+                    and then (Flags (1) and Data_Ready_Bits) = Data_Ready_Bits
+                  then
+                     Ok := True;
+                     exit;
+                  end if;
+               end;
+            end loop;
+         end if;
       end if;
    end Configure;
 

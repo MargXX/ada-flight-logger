@@ -32,9 +32,12 @@ package BMP390 is
    --  length of the factory calibration block
    Calibration_Size : constant := 21;
 
-   --  Apply the settings and start measuring pressure and temperature.
-   --  Ok is also False if the chip rejects the combination: the output period
-   --  must be longer than the measurement time the oversampling needs.
+   --  Soft reset the chip, apply the settings and start measuring pressure
+   --  and temperature. Blocks for about 10 ms, plus up to 100 ms in normal
+   --  mode while it waits for the first new result.
+   --  Ok is also False if the chip rejects the combination (the output
+   --  period must be longer than the measurement time the oversampling
+   --  needs), if the mode does not read back, or if no new result arrives.
    procedure Configure
      (Mode        : Power_Mode;
       Pressure    : Oversampling;
