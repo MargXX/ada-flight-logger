@@ -43,16 +43,19 @@ Flight rate lasts 5 minutes, then the logger drops back to ground rate and re-ar
 | `flight_reader` | Sends each written page over UART as one line of hex, with nothing else on the line |
 | `sensor_test` | Prints sensor readings and the barometer calibration over UART |
 | `flash_erase` | Erases the whole chip after `E` is sent over UART to confirm |
+| `flash_dump_swd` | Copies flash into RAM on request so `tools/swd_dump.sh` can read it over SWD. No UART. |
 
 ## Source layout
 
 | Path | Contents |
 | --- | --- |
-| `src/*.adb` | The four programs above, each with its own clock, pin and I2C setup |
+| `src/*.adb` | The programs above, each with its own clock, pin and I2C setup |
+| `src/swd_mailbox` | Shared RAM between `flash_dump_swd` and the debugger |
 | `src/drivers/` | `lsm9ds1`, `bmp390` and `w25q128`, with modes selected by enum |
 | `src/core/` | `launch_detect` and `sample_log`, which have no hardware access |
 | `src/debug_uart` | UART for the bench tools only |
 | `tests/` | Host tests for `src/core` |
+| `tools/swd_dump.sh` | Reads the flash over SWD into a raw image |
 
 ---
 
@@ -78,7 +81,13 @@ A brownout restart resumes at the first blank page, so existing data is kept. Th
 
 ### Reading data back
 
-Flash `flight_reader` and start a capture at 115200 baud within 5 seconds of power-up. The LED goes solid when it finishes. A full chip takes about 49 minutes.
+Over SWD, preferred. Reads the whole chip in about 3.5 minutes into a raw image, 256 bytes per page. Pass a page count to read less, for example `4096` for a short bench log.
+
+```bash
+tools/swd_dump.sh flight.bin
+```
+
+Over UART: flash `flight_reader` and start a capture at 115200 baud within 5 seconds of power-up. The LED goes solid when it finishes. A full chip takes about 49 minutes. On a Mac, long UART captures through the Debug Probe have dropped or garbled stretches, so check the page sequence numbers or use SWD.
 
 ```bash
 screen -L -Logfile flight.hex /dev/ttyUSBx 115200
@@ -95,7 +104,7 @@ All values are LSB first. Each line from `flight_reader` is one 256-byte page.
 | Offset | Size | Field | Notes |
 | --- | --- | --- | --- |
 | 0-3 | 4 | Timestamp | Microseconds since boot, wraps about every 71 minutes |
-| 4-9 | 6 | Accel X, Y, Z | Signed 16-bit raw, 0.732 mg/LSB at ±16 g |
+| 4-9 | 6 | Accel X, Y, Z | Signed 16-bit raw, 0.732 mg/LSB at the "±16 g" setting, which spans about ±24 g |
 | 10-15 | 6 | Gyro X, Y, Z | Signed 16-bit raw, 70 mdps/LSB at ±2000 dps |
 | 16-18 | 3 | Pressure | BMP390 raw 24-bit |
 | 19-21 | 3 | Temperature | BMP390 raw 24-bit |
@@ -139,19 +148,23 @@ The first flight's log ended at about 25 hours, likely from the batteries, so po
 ## Open questions
 
 - [ ] Do the 3 g and 100 ms trigger settings hold up against real handling? The log can't show bumps shorter than its 200 ms spacing.
-- [ ] Does a tick fit in 10 ms on hardware? Estimated yes, at roughly 3 ms for the sensors plus a few ms for a page write. The missed deadline count will show it.
-- [ ] Are the 1 ms chip select delays safe to remove? The first flight had them, and this firmware uses 1 µs.
+- [x] Does a tick fit in 10 ms on hardware? Yes. A 9-minute bench log, including 3 minutes at flight rate, had 0 missed deadlines and every gap exactly 10,000 or 100,000 µs.
+- [x] Are the 1 ms chip select delays safe to remove? Yes on the bench. The same log wrote 2,002 pages with 1 µs delays, 0 flash errors and no sequence gaps.
 - [ ] Is 20 hours at ground rate enough for the pad wait?
 
 ---
 
-## Testing plan
+## Testing
 
-- Run the host tests: `cd tests && alr build && ./bin/host_tests`.
-- Run `sensor_test` and check that every setup line says `ok` and readings are sensible. Accel should show about 1366 counts in total at rest.
-- Bench run: read the log back and check timestamps, the missed deadline count and the error count.
-- Shake or spin test: trigger launch detection and confirm 100 Hz spacing appears, then returns to 10 Hz after 5 minutes.
-- Measure a tick with a spare GPIO and a logic analyzer.
+Bench results from November 2026, on the flight PCB.
+
+- [x] Run the host tests: `cd tests && alr build && ./bin/host_tests`.
+- [x] Run `sensor_test`. Every setup line says `ok`, and the flash ID matches.
+- [x] Check the accel scale against gravity. At rest the magnitude averaged 1,314 counts, or 0.96 g at the datasheet's 0.732 mg/LSB, within the sensor's tolerance. The `FS_XL = 01` setting is called ±16 g, but at that sensitivity the full count range is about ±24 g. The 1366 counts/g used for the trigger is correct. A ±16 g span would have read 2,048 counts at rest.
+- [x] Bench run: 2,002 pages with sequence 0 to 2001, format `A2`, 0 missed deadlines, 0 errors.
+- [x] Shake test: launch triggered 200 ms after the first logged reading above 3 g, and 100 Hz spacing started there. The shake peaked at 15.8 g with no axis clipping.
+- [ ] Confirm the logger drops back to 10 Hz after 5 minutes at flight rate. The bench run was read back after 3.
+- [ ] Measure a tick with a spare GPIO and a logic analyzer.
 
 ---
 

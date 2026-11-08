@@ -14,7 +14,9 @@ with Interfaces; use Interfaces;
 package Launch_Detect
   with Pure
 is
-   --  only valid at the +/-16 g range: 0.732 mg/LSB is about 1366 counts/g
+   --  only valid at the "+/-16 g" setting: 0.732 mg/LSB is about 1366
+   --  counts/g, so the full count range is about +/-24 g. Checked against
+   --  gravity on the bench: 1314 counts at rest.
    Counts_Per_G     : constant := 1366;
    Threshold_G      : constant := 3;
    Threshold_Counts : constant := Threshold_G * Counts_Per_G;
