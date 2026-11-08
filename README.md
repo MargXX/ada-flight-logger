@@ -31,7 +31,7 @@ Every 10 ms tick reads the accelerometer. Launch is declared after 10 consecutiv
 
 In the April 2026 log, boost was the only sustained stretch above 3 g in 25 hours, though that log only sampled at about 5 Hz. Boost also looked short, with about 0.8 s above 1.5 g, which is why the accelerometer is checked on every tick rather than at the 10 Hz logging rate.
 
-Flight rate lasts 5 minutes, then the logger drops back to ground rate and re-arms. A false trigger on the pad therefore costs about 4% of the flash and can't stop a real launch from being detected.
+Flight rate lasts 10 minutes, then the logger drops back to ground rate and re-arms. Each minute at flight rate uses about 140 KB, 0.8% of the chip, so a false trigger on the pad costs about 8% of the flash and can't stop a real launch from being detected.
 
 ---
 
@@ -129,7 +129,7 @@ A failed sensor read logs zeros for that sensor and adds to the error count.
 
 | Rate | Time to fill an empty chip |
 | --- | --- |
-| 10 Hz ground | About 20 hours |
+| 10 Hz ground | About 20 hours, or about 18.4 hours after one 10-minute flight |
 | 100 Hz flight | About 2 hours |
 
 The first flight's log ended at about 25 hours, likely from the batteries, so power and flash now run out on similar timescales.
@@ -163,7 +163,8 @@ Bench results from November 2026, on the flight PCB.
 - [x] Check the accel scale against gravity. At rest the magnitude averaged 1,314 counts, or 0.96 g at the datasheet's 0.732 mg/LSB, within the sensor's tolerance. The `FS_XL = 01` setting is called ±16 g, but at that sensitivity the full count range is about ±24 g. The 1366 counts/g used for the trigger is correct. A ±16 g span would have read 2,048 counts at rest.
 - [x] Bench run: 2,002 pages with sequence 0 to 2001, format `A2`, 0 missed deadlines, 0 errors.
 - [x] Shake test: launch triggered 200 ms after the first logged reading above 3 g, and 100 Hz spacing started there. The shake peaked at 15.8 g with no axis clipping.
-- [ ] Confirm the logger drops back to 10 Hz after 5 minutes at flight rate. The bench run was read back after 3.
+- [x] Flight rate lasted exactly 30,000 ticks (299.99 s) with the earlier 5-minute setting, then every gap returned to exactly 100 ms. Repeat once with 10 minutes.
+- [x] Barometer restart: one 9-minute run logged a single frozen pressure and temperature value with no errors. The BMP390 keeps power across a Pico reset and had ignored the mode change. Setup now soft resets it, reads the mode back and waits for a new result. After 6 resets in a row, starting from the frozen state, every boot logged live values.
 - [ ] Measure a tick with a spare GPIO and a logic analyzer.
 
 ---
