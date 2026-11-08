@@ -13,7 +13,8 @@ project Ada_Flight_Logger is
      ("flight_logger.adb",
       "flight_reader.adb",
       "sensor_test.adb",
-      "flash_erase.adb");
+      "flash_erase.adb",
+      "flash_dump_swd.adb");
 
    package Linker is
       for Switches ("Ada") use Pico_BSP.Linker_Switches;

@@ -12,3 +12,7 @@
 *.ali
 
 .DS_Store
+
+# Flash images and dumps, kept locally
+/flight_data_backup/
+*.bin
