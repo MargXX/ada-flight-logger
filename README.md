@@ -4,13 +4,13 @@ Flight data logger firmware for the Brown Rocketry payload, written in Ada for t
 
 This is an improved version of [`terrarium_pico`](https://github.com/Brown-Rocketry/IREC-2025-2026/tree/main/terrarium_pico), the firmware flown in April 2026, on the same board and wiring. That firmware had no launch awareness, so it had to log continuously at a low rate to hold about 21 hours of pre-flight data on the 16 MB chip, and a chip that size can't sustain more than about 8 Hz for that long. As a result, only about 222 samples covered the 45.2 second flight. This version keeps the same simple single-loop design and fixes what the recovered data showed was holding it back.
 
-**Status:** written and builds, with host tests passing for launch detection and page packing. **It has not been run on hardware yet.** Timing below is estimated from the first flight's log, not measured on this firmware.
+**Status:** flown in November 2026. The flight log was recovered with no sequence gaps, 0 missed deadlines and 0 errors. Results are in [First flight](#first-flight-november-2026).
 
 ---
 
 ## Improvements over `terrarium_pico`
 
-The rates below are design targets, since this firmware has not flown yet.
+The sample counts below are for a flight of the same 45.2 s length. This firmware's first flight was shorter, about 37.5 s, and logged 3,748 samples.
 
 | Area | `terrarium_pico` | This firmware | Why it matters |
 | --- | --- | --- | --- |
@@ -35,6 +35,31 @@ Flight rate lasts 10 minutes, then the logger drops back to ground rate and re-a
 
 ---
 
+## First flight, November 2026
+
+The logger sat on the pad for 6.1 hours at ground rate, detected launch with no false triggers, and logged 10 minutes at flight rate. The whole log used 20,212 pages, 31% of the chip.
+
+| Measurement | Value | Source |
+| --- | --- | --- |
+| Apogee | 358 m (1,173 ft) at 8.0 s | Barometer |
+| Peak boost acceleration | 18.2 g measured, 17.1 g vertical with gravity removed. Past the rated ±16 g, see below | Accelerometer, gyro |
+| Burn time | About 0.7 s | Accelerometer |
+| Max vertical speed | 101 m/s (331 ft/s) at burnout | Accelerometer and gyro, integrated |
+| Ejection | 10.2 s, about 2.2 s after apogee | Accelerometer |
+| Descent under parachute | 11.7 m/s | Barometer |
+| Landing | About 37.5 s, at least 36.8 g with the X axis clipped | Accelerometer |
+| Roll rate in boost and coast | About 85-120 deg/s | Gyro |
+| Nose tilt | Under 10 deg until 7 s, then about 60 deg by ejection | Accelerometer and gyro |
+| Flight samples, liftoff to landing | 3,748 | Log |
+| Missed deadlines, errors, sequence gaps | 0, 0, 0 | Log |
+
+- **Scale check:** gravity on the pad read 1,353 counts, 0.990 g at 0.732 mg/LSB, confirming the "±16 g" setting spans about ±24 g.
+- **Rated range:** the datasheet only specifies the accelerometer within ±16 g, so readings from 16 g to 24 g are recorded but not guaranteed linear. 42 samples went past 16 g on some axis: the first 0.39 s of boost (X up to 18.1 g), ejection (X 23.5 g), the second deployment at 15.5 s (Y 18.1 g) and landing. The boost peak, and the IMU speed and altitude integrated through it, carry that uncertainty. The charts shade these samples.
+- **Timing:** every gap at flight rate was exactly 10 ms.
+- **IMU vs barometer:** integrating vertical acceleration twice gave a 328 m apogee, 30 m under the barometer. Their vertical speeds agree from about 2 s to 7 s.
+
+---
+
 ## Programs
 
 | Program | Purpose |
@@ -56,6 +81,8 @@ Flight rate lasts 10 minutes, then the logger drops back to ground rate and re-a
 | `src/debug_uart` | UART for the bench tools only |
 | `tests/` | Host tests for `src/core` |
 | `tools/swd_dump.sh` | Reads the flash over SWD into a raw image |
+| `tools/plot_flight.py` | Charts altitude and acceleration from a log, and the raw gyro with `--raw` |
+| `tools/plot_attitude.py` | Combines gyro and accelerometer to chart vertical speed, ground-frame acceleration and nose tilt |
 
 ---
 
@@ -92,6 +119,18 @@ Over UART: flash `flight_reader` and start a capture at 115200 baud within 5 sec
 ```bash
 screen -L -Logfile flight.hex /dev/ttyUSBx 115200
 ```
+
+### Plotting
+
+Needs [uv](https://docs.astral.sh/uv/), which installs numpy and matplotlib on the first run. Both scripts take a `.bin` from `swd_dump.sh` or a `.hex` from `flight_reader`, plus the barometer calibration line from `sensor_test`, either as hex or as a file holding it. Each writes a PNG next to the log.
+
+```bash
+uv run tools/plot_flight.py flight.bin --calib calibration.txt          # altitude and acceleration
+uv run tools/plot_flight.py flight.bin --calib calibration.txt --raw    # unfiltered, with gyro
+uv run tools/plot_attitude.py flight.bin --calib calibration.txt       # gyro and accel combined
+```
+
+Add `--show` to open a window to zoom in, or `--after SECONDS` to set how much of the flight to show.
 
 ---
 
@@ -140,17 +179,21 @@ The first flight's log ended at about 25 hours, likely from the batteries, so po
 
 - **Early boost is slightly under-sampled.** There is no pre-launch buffer, so the 100 ms before detection is logged at 10 Hz.
 - **Barometer data repeats at flight rate.** It updates at 50 Hz while samples are logged at 100 Hz.
-- **Timestamps wrap every 71 minutes.** This is still fixed up in post-processing.
+- **Timestamps wrap every 71 minutes.** The plotting scripts unwrap them.
+- **Boost exceeds the accelerometer's rated range.** The "±16 g" setting reads to about ±24 g, but linearity is only specified to ±16 g, and boost reached 18.1 g on X. The LSM9DS1 has no higher range, so a higher-g accelerometer would be needed to stay in spec.
+- **Landing can clip the accelerometer.** The first flight's landing pinned the X axis at the ±24 g limit for two samples.
+- **The barometer misreads in boost and at ejection.** Air moving fast past the sensor during boost made it jump to about 125 m by 1 s, well above the true altitude, and the ejection charge put a spike of about 2,000 m in the reading. `plot_flight.py` uses a 0.5 s median filter so neither counts as apogee.
+- **Gyro tracking drifts.** Tilt and IMU altitude are most reliable early in the flight. `plot_attitude.py` stops integrating altitude at ejection.
 - **The logger doesn't check that the rest of the chip is blank.** It only checks page 0 and looks for the first blank page, so skipping `flash_erase` after other tools have written to the chip could corrupt data.
 
 ---
 
 ## Open questions
 
-- [ ] Do the 3 g and 100 ms trigger settings hold up against real handling? The log can't show bumps shorter than its 200 ms spacing.
+- [x] Do the 3 g and 100 ms trigger settings hold up against real handling? Yes for the first flight. There were no false triggers over 6.1 hours on the pad, and launch was detected about 0.04 s after the first logged reading above 1.5 g.
 - [x] Does a tick fit in 10 ms on hardware? Yes. A 9-minute bench log, including 3 minutes at flight rate, had 0 missed deadlines and every gap exactly 10,000 or 100,000 µs.
 - [x] Are the 1 ms chip select delays safe to remove? Yes on the bench. The same log wrote 2,002 pages with 1 µs delays, 0 flash errors and no sequence gaps.
-- [ ] Is 20 hours at ground rate enough for the pad wait?
+- [x] Is 20 hours at ground rate enough for the pad wait? Yes for the first flight. The pad wait was 6.1 hours, and the full log used 31% of the chip.
 
 ---
 
@@ -163,7 +206,7 @@ Bench results from November 2026, on the flight PCB.
 - [x] Check the accel scale against gravity. At rest the magnitude averaged 1,314 counts, or 0.96 g at the datasheet's 0.732 mg/LSB, within the sensor's tolerance. The `FS_XL = 01` setting is called ±16 g, but at that sensitivity the full count range is about ±24 g. The 1366 counts/g used for the trigger is correct. A ±16 g span would have read 2,048 counts at rest.
 - [x] Bench run: 2,002 pages with sequence 0 to 2001, format `A2`, 0 missed deadlines, 0 errors.
 - [x] Shake test: launch triggered 200 ms after the first logged reading above 3 g, and 100 Hz spacing started there. The shake peaked at 15.8 g with no axis clipping.
-- [x] Flight rate lasted exactly 30,000 ticks (299.99 s) with the earlier 5-minute setting, then every gap returned to exactly 100 ms. Repeat once with 10 minutes.
+- [x] Flight rate lasted exactly 30,000 ticks (299.99 s) with the earlier 5-minute setting, then every gap returned to exactly 100 ms. Confirmed with 10 minutes on the first flight, which logged 600.0 s at flight rate.
 - [x] Barometer restart: one 9-minute run logged a single frozen pressure and temperature value with no errors. The BMP390 keeps power across a Pico reset and had ignored the mode change. Setup now soft resets it, reads the mode back and waits for a new result. After 6 resets in a row, starting from the frozen state, every boot logged live values.
 - [ ] Measure a tick with a spare GPIO and a logic analyzer.
 
@@ -190,3 +233,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg \
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+Developed with AI assistance.

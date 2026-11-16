@@ -32,9 +32,27 @@ PAGE = 256
 SAMPLE = 22
 SAMPLES_PER_PAGE = 11
 FORMAT = 0xA2
+MDPS_PER_LSB = 70.0         # gyro at +/-2000 dps
 MG_PER_LSB = 0.732          # accel at the "+/-16 g" setting, spans about +/-24 g
 COUNTS_PER_G = 1000 / MG_PER_LSB
 CLIP = 32760                # raw counts at or past this are at the limit
+RATED_G = 16.0              # datasheet range; 16 to 24 g reads but isn't specified
+
+
+def spans(mask, x, min_width=0.12):
+    """(start, end) of each run of True in mask, widened so single samples show."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], mask.astype(int), [0]))))
+    out = []
+    for a, b in zip(edges[::2], edges[1::2]):
+        lo, hi = x[a], x[b - 1]
+        pad = max(0.0, (min_width - (hi - lo)) / 2)
+        out.append((lo - pad, hi + pad))
+    return out
+
+
+def beyond_rated(acc):
+    """Samples with any axis past the rated range."""
+    return (np.abs(acc) > RATED_G).any(axis=1)
 FT_PER_M = 3.28084
 
 
@@ -55,8 +73,13 @@ def load_pages(path):
     return b"".join(pages)
 
 
-def parse(data):
-    """Decode written pages into per-sample arrays."""
+def parse(data, with_gyro=False):
+    """Decode written pages into per-sample arrays.
+
+    Returns time (s), accel (g), raw pressure, raw temperature and the rate
+    byte. With gyro=True, also returns the gyro in deg/s, last.
+    """
+    gyro = []
     t, acc, p_raw, t_raw, rate = [], [], [], [], []
     expected = None
     for off in range(0, len(data) - PAGE + 1, PAGE):
@@ -71,9 +94,10 @@ def parse(data):
         expected = seq + 1
         for i in range(SAMPLES_PER_PAGE):
             s = i * SAMPLE
-            ts, ax, ay, az = struct.unpack_from("<Ihhh", page, s)
+            ts, ax, ay, az, gx, gy, gz = struct.unpack_from("<Ihhhhhh", page, s)
             t.append(ts)
             acc.append((ax, ay, az))
+            gyro.append((gx, gy, gz))
             p_raw.append(int.from_bytes(page[s + 16:s + 19], "little"))
             t_raw.append(int.from_bytes(page[s + 19:s + 22], "little"))
             rate.append(page[248])
@@ -87,8 +111,11 @@ def parse(data):
     t = np.array(t, dtype=np.int64)
     wraps = np.concatenate(([0], np.cumsum(np.diff(t) < 0)))
     t = (t + wraps * 2**32) / 1e6
-    return (t, np.array(acc, float) * MG_PER_LSB / 1000,
-            np.array(p_raw, float), np.array(t_raw, float), np.array(rate))
+    out = (t, np.array(acc, float) * MG_PER_LSB / 1000,
+           np.array(p_raw, float), np.array(t_raw, float), np.array(rate))
+    if with_gyro:
+        out += (np.array(gyro, float) * MDPS_PER_LSB / 1000,)
+    return out
 
 
 # --- barometer ----------------------------------------------------------------
@@ -175,13 +202,15 @@ def main():
     ap.add_argument("--before", type=float, default=5.0, help="seconds shown before liftoff")
     ap.add_argument("--after", type=float, help="seconds shown after liftoff, default to landing")
     ap.add_argument("--show", action="store_true", help="also open a window")
+    ap.add_argument("--raw", action="store_true",
+                    help="plot altitude unfiltered, full scale, with no apogee marker")
     args = ap.parse_args()
 
     calib = args.calib
     if Path(calib).is_file():
         calib = Path(calib).read_text().strip()
 
-    t, acc, p_raw, t_raw, rate = parse(load_pages(args.log))
+    t, acc, p_raw, t_raw, rate, gyro = parse(load_pages(args.log), with_gyro=True)
     g = np.linalg.norm(acc, axis=1)
     t0, t_detect = find_liftoff(t, g, rate)
 
@@ -215,10 +244,15 @@ def main():
     i_max = np.argmax(np.where(boost, gw, -np.inf))
     i_hit = np.argmax(np.where(x > x[i_apo], gw, -np.inf))
     clipped = (np.abs(acc[w]) * COUNTS_PER_G >= CLIP).any(axis=1)
+    over = beyond_rated(acc[w])
+    max_note = " (an axis past rated +/-16 g)" if over[i_max] else ""
 
     print(f"ground pressure {p0 / 100:.2f} hPa, {np.median(temp_c[pad]):.1f} C")
     print(f"liftoff at {t0:.3f} s since boot, launch detected {t_detect - t0:.2f} s later")
-    print(f"max boost acceleration {gw[i_max]:.1f} g at {x[i_max]:.2f} s")
+    print(f"max boost acceleration {gw[i_max]:.1f} g at {x[i_max]:.2f} s{max_note}")
+    if over.any():
+        print(f"{int(over.sum())} samples have an axis past rated +/-16 g, in "
+              f"{len(spans(over, x))} stretches; linearity there isn't specified")
     print(f"largest after apogee {gw[i_hit]:.1f} g at {x[i_hit]:.2f} s"
           + (", clipped at the accel limit" if clipped[i_hit] else ""))
     if clipped.any():
@@ -232,42 +266,73 @@ def main():
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(11, 7.5),
-                                   constrained_layout=True)
-    fig.suptitle(f"{args.log.name}: acceleration and altitude")
+    # altitude on top, then acceleration; the raw chart adds the gyro
+    if args.raw:
+        fig, (ax2, ax1, ax3) = plt.subplots(
+            3, 1, sharex=True, figsize=(11, 9.5), constrained_layout=True,
+            gridspec_kw={"height_ratios": [3, 3, 2]})
+        fig.suptitle(f"{args.log.name}: raw altitude, acceleration and gyro")
+    else:
+        fig, (ax2, ax1) = plt.subplots(2, 1, sharex=True, figsize=(11, 7.5),
+                                       constrained_layout=True)
+        ax3 = None
+        fig.suptitle(f"{args.log.name}: altitude and acceleration")
 
     for k, name, color in ((0, "X", "#d97706"), (1, "Y", "#7c3aed"), (2, "Z", "#0891b2")):
         ax1.plot(x, acc[w, k], lw=0.6, alpha=0.55, color=color, label=name)
     ax1.plot(x, gw, lw=1.1, color="#111827", label="|a|")
     ax1.axhline(3.0, ls=":", lw=0.8, color="#9ca3af")
-    ax1.annotate(f"boost {gw[i_max]:.1f} g", (x[i_max], gw[i_max]),
+    for sign in (1, -1):
+        ax1.axhline(sign * RATED_G, ls="--", lw=0.7, color="#ea580c",
+                    label="rated +/-16 g" if sign > 0 else None)
+    for k, (lo, hi) in enumerate(spans(over, x)):
+        ax1.axvspan(lo, hi, color="#fdba74", alpha=0.35, lw=0,
+                    label="axis past rated range" if k == 0 else None)
+    ax1.annotate(f"boost {gw[i_max]:.1f} g" + ("\npast rated range" if over[i_max] else ""),
+                 (x[i_max], gw[i_max]),
                  xytext=(8, 0), textcoords="offset points", fontsize=9)
     if clipped.any():
         ax1.plot(x[clipped], gw[clipped], "x", color="#dc2626", ms=5, label="clipped")
-    ax1.set_ylabel("acceleration (g)")
-    ax1.legend(loc="upper left", ncol=5, fontsize=8, frameon=False)
+    ax1.set_ylabel("acceleration\n(g)")
+    ax1.legend(loc="upper left", ncol=4, fontsize=8, frameon=False)
     ax1.grid(alpha=0.3)
 
-    ax2.plot(x, hr, lw=0.6, alpha=0.35, color="#93c5fd", label="raw")
-    ax2.plot(x, hw, lw=1.4, color="#2563eb", label="0.5 s median")
-    span = np.nanmax(hw) - np.nanmin(hw)
-    ax2.set_ylim(np.nanmin(hw) - 0.1 * span, np.nanmax(hw) + 0.15 * span)
-    ax2.legend(loc="upper right", fontsize=8, frameon=False)
-    ax2.plot(x[i_apo], hw[i_apo], "o", color="#dc2626", ms=5)
-    ax2.annotate(f"apogee {hw[i_apo]:.0f} m / {hw[i_apo] * FT_PER_M:.0f} ft\nat {x[i_apo]:.1f} s",
-                 (x[i_apo], hw[i_apo]), xytext=(8, 6), textcoords="offset points", fontsize=9)
-    ax2.set_ylabel("altitude above pad (m)")
-    ax2.set_xlabel("time since liftoff (s)")
+    if args.raw:
+        ax2.plot(x, hr, lw=0.8, color="#2563eb", label="raw, unfiltered")
+        ax2.legend(loc="upper right", fontsize=8, frameon=False)
+    else:
+        ax2.plot(x, hr, lw=0.6, alpha=0.35, color="#93c5fd", label="raw")
+        ax2.plot(x, hw, lw=1.4, color="#2563eb", label="0.5 s median")
+        span = np.nanmax(hw) - np.nanmin(hw)
+        ax2.set_ylim(np.nanmin(hw) - 0.1 * span, np.nanmax(hw) + 0.15 * span)
+        ax2.legend(loc="upper right", fontsize=8, frameon=False)
+        ax2.plot(x[i_apo], hw[i_apo], "o", color="#dc2626", ms=5)
+        ax2.annotate(f"apogee {hw[i_apo]:.0f} m / {hw[i_apo] * FT_PER_M:.0f} ft\nat {x[i_apo]:.1f} s",
+                     (x[i_apo], hw[i_apo]), xytext=(8, 6), textcoords="offset points", fontsize=9)
+    ax2.set_ylabel("altitude\nabove pad (m)")
     ax2.grid(alpha=0.3)
     ft = ax2.secondary_yaxis("right", functions=(lambda m: m * FT_PER_M, lambda f: f / FT_PER_M))
     ft.set_ylabel("ft")
 
-    for ax in (ax1, ax2):
+    axes = [ax1, ax2]
+    if ax3 is not None:
+        # gyro as logged, bias not removed
+        for k, name, color in ((0, "X", "#d97706"), (1, "Y", "#7c3aed"), (2, "Z", "#0891b2")):
+            ax3.plot(x, gyro[w, k], lw=0.7, color=color, label=name)
+        ax3.axhline(0, lw=0.6, color="#6b7280")
+        ax3.set_ylabel("rotation rate\n(deg/s)")
+        ax3.legend(loc="upper left", ncol=3, fontsize=8, frameon=False)
+        ax3.grid(alpha=0.3)
+        axes.append(ax3)
+    axes[-1].set_xlabel("time since liftoff (s)")
+
+    for ax in axes:
         ax.axvline(0, lw=0.8, color="#16a34a")
         ax.axvline(t_detect - t0, lw=0.8, ls="--", color="#16a34a")
     ax1.text(t_detect - t0, ax1.get_ylim()[1], " detected", va="top", fontsize=8, color="#16a34a")
 
-    out = args.out or args.log.with_suffix(".png")
+    out = args.out or args.log.with_name(args.log.stem + ("_raw" if args.raw else "") + ".png")
+    fig.align_ylabels()
     fig.savefig(out, dpi=150)
     print(f"wrote {out}")
     if args.show:
